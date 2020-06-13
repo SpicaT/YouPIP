@@ -160,13 +160,13 @@
     return controls;
 }
 
-- (void)setTopOverlayVisible:(BOOL)visible isAutonavCanceledState:(BOOL)arg2 {
-    if (visible) {
-        self.pipButton.alpha = 1;
-        self.pipButton.hidden = NO;
+- (void)setTopOverlayVisible:(BOOL)visible isAutonavCanceledState:(BOOL)canceledState {
+    if (canceledState) {
+        if (!self.pipButton.hidden)
+            self.pipButton.alpha = 0.0;
     } else {
-        self.pipButton.alpha = 0;
-        self.pipButton.hidden = YES;
+        if (!self.pipButton.hidden)
+            self.pipButton.alpha = visible ? 1.0 : 0.0;
     }
     %orig;
 }
