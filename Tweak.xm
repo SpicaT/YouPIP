@@ -1,4 +1,16 @@
 #import <UIKit/UIImage+Private.h>
+#import <AVKit/AVKit.h>
+#import <version.h>
+
+@class MLVideo, MLInnerTubePlayerConfig;
+
+@protocol MLHAMPlayerViewProtocol
+- (void)makeActivePlayer;
+- (void)setVideo:(MLVideo *)video playerConfig:(MLInnerTubePlayerConfig *)playerConfig;
+@end
+
+@protocol HAMPixelBufferRenderingView
+@end
 
 @interface GPBExtensionRegistry : NSObject
 - (void)addExtension:(id)extension;
@@ -12,24 +24,37 @@
 + (id)pictureInPictureRenderer;
 @end
 
-@interface YTIIosMediaHotConfig : NSObject
+@interface YTIosMediaHotConfig : NSObject
 - (BOOL)enablePictureInPicture;
 - (void)setEnablePictureInPicture:(BOOL)enabled;
 @end
 
 @interface YTHotConfig : NSObject
-- (YTIIosMediaHotConfig *)mediaHotConfig;
+- (YTIosMediaHotConfig *)mediaHotConfig;
+@end
+
+@interface YTPlayerStatus : NSObject
 @end
 
 @interface GIMMe
-- (id)nullableInstanceForType:(id)protocol;
-- (id)instanceForType:(id)protocol;
+- (instancetype)allocOf:(Class)cls;
+- (id)nullableInstanceForType:(id)type;
+- (id)instanceForType:(id)type;
 @end
 
-@interface MLPIPController : NSObject
+@interface MLAVPlayerLayerView : UIView <MLHAMPlayerViewProtocol>
+@end
+
+@interface MLAVPIPPlayerLayerView : MLAVPlayerLayerView
+- (AVPlayerLayer *)layer;
+@end
+
+@interface MLPIPController : NSObject <AVPictureInPictureControllerDelegate>
 - (id)initWithPlaceholderPlayerItemResourcePath:(NSString *)placeholderPath;
 - (BOOL)isPictureInPictureSupported;
+- (BOOL)isPictureInPictureActive;
 - (GIMMe *)gimme;
+- (MLAVPIPPlayerLayerView *)playerLayerView;
 - (void)setGimme:(GIMMe *)gimme;
 - (void)initializePictureInPicture;
 - (BOOL)startPictureInPicture;
@@ -47,6 +72,30 @@
 - (MLStreamingData *)streamingData;
 @end
 
+@interface MLInnerTubePlayerConfig : NSObject
+@end
+
+@interface MLPlayerStickySettings : NSObject
+@property(assign) float rate;
+@end
+
+@interface MLAVPlayer : AVPlayer
+@property(assign) BOOL active;
+@property(assign) float rate;
+- (instancetype)initWithVideo:(MLVideo *)video playerConfig:(MLInnerTubePlayerConfig *)playerConfig stickySettings:(MLPlayerStickySettings *)stickySettings externalPlaybackActive:(BOOL)externalPlaybackActive;
+- (GIMMe *)gimme;
+- (MLVideo *)video;
+- (MLInnerTubePlayerConfig *)config;
+- (UIView <MLHAMPlayerViewProtocol> *)playerView;
+- (UIView <HAMPixelBufferRenderingView> *)renderingView;
+- (BOOL)externalPlaybackActive;
+- (void)setRenderingView:(UIView <HAMPixelBufferRenderingView> *)renderingView;
+@end
+
+@interface MLPlayerPool : NSObject
+- (GIMMe *)gimme;
+@end
+
 @interface YTSingleVideo : NSObject
 - (MLVideo *)video;
 @end
@@ -54,6 +103,7 @@
 @class YTLocalPlaybackController;
 
 @interface YTSingleVideoController : NSObject
+- (YTSingleVideo *)singleVideo;
 - (YTSingleVideo *)videoData;
 - (YTLocalPlaybackController *)delegate;
 @end
@@ -71,12 +121,17 @@
 @end
 
 @interface YTPlayerPIPController : NSObject
+@property(retain, nonatomic) YTSingleVideoController *activeSingleVideo;
+- (instancetype)initWithPlayerView:(id)playerView delegate:(id)delegate;
+- (BOOL)isPictureInPictureActive;
 - (BOOL)canInvokePictureInPicture;
+- (void)maybeInvokePictureInPicture;
 @end
 
 @interface YTLocalPlaybackController : NSObject {
     YTPlayerPIPController *_playerPIPController;
 }
+- (GIMMe *)gimme;
 @end
 
 @interface GIMBindingBuilder : NSObject
@@ -85,6 +140,7 @@
 @end
 
 @interface QTMIcon : NSObject
++ (UIImage *)imageWithName:(NSString *)name color:(UIColor *)color;
 + (UIImage *)tintImage:(UIImage *)image color:(UIColor *)color;
 @end
 
@@ -120,8 +176,17 @@
 + (UIColor *)white1;
 @end
 
+@interface MLDefaultPlayerViewFactory : NSObject
+- (BOOL)canUsePlayerView:(UIView *)playerView forVideo:(MLVideo *)video playerConfig:(MLInnerTubePlayerConfig *)config;
+- (MLAVPlayerLayerView *)AVPlayerViewForVideo:(MLVideo *)video playerConfig:(MLInnerTubePlayerConfig *)config;
+@end
+
 @interface NSMutableArray (YouTube)
 - (void)yt_addNullableObject:(id)object;
+@end
+
+@interface AVPlayerLayer (Private)
+@property(assign) BOOL PIPModeEnabled;
 @end
 
 %hook YTMainAppVideoPlayerOverlayViewController
@@ -196,8 +261,149 @@
     YTSingleVideoController *single = [(YTPlaybackControllerUIWrapper *)[v valueForKey:@"_playerViewDelegate"] contentVideo];
     YTLocalPlaybackController *local = [single delegate];
     YTPlayerPIPController *controller = [local valueForKey:@"_playerPIPController"];
-    if ([controller canInvokePictureInPicture])
-        [(MLPIPController *)[controller valueForKey:@"_pipController"] startPictureInPicture];
+    MLPIPController *pip = (MLPIPController *)[controller valueForKey:@"_pipController"];
+    if ([pip valueForKey:@"_pictureInPictureController"] == nil) {
+        MLAVPIPPlayerLayerView *pipLayer = [pip valueForKey:@"_pipPlayerLayerView"];
+        AVPlayerLayer *avLayer = [pipLayer layer];
+        avLayer.PIPModeEnabled = YES;
+        AVPictureInPictureController *avpip = [[AVPictureInPictureController alloc] initWithPlayerLayer:avLayer];
+        avpip.delegate = pip;
+        [pip setValue:avpip forKey:@"_pictureInPictureController"];
+    }
+    if ([controller canInvokePictureInPicture]) {
+        if ([pip respondsToSelector:@selector(startPictureInPicture)])
+            [pip startPictureInPicture];
+        else {
+            AVPictureInPictureController *avpip = [pip valueForKey:@"_pictureInPictureController"];
+            [avpip startPictureInPicture];
+        }
+    }
+}
+
+%end
+
+static BOOL overridePictureInPicture = NO;
+static BOOL isInPictureInPicture = NO;
+
+%hook YTLocalPlaybackController
+
+- (id)initWithParentResponder:(id)arg2 overlayFactory:(id)arg3 playerView:(id)playerView playbackControllerDelegate:(id)arg5 viewportSizeProvider:(id)arg6 lightweightPlayback:(bool)arg7 {
+    id r = %orig;
+    if ([self valueForKey:@"_playerPIPController"] == nil) {
+        YTPlayerPIPController *pip = [(YTPlayerPIPController *)[[self gimme] allocOf:%c(YTPlayerPIPController)] initWithPlayerView:playerView delegate:self];
+        [self setValue:pip forKey:@"_playerPIPController"];
+    }
+    return r;
+}
+
+- (void)videoSequencer:(id)arg2 didActivateVideoController:(YTSingleVideoController *)videoController {
+    %orig;
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        YTPlayerPIPController *pip = [self valueForKey:@"_playerPIPController"];
+        [pip setActiveSingleVideo:videoController];
+    }
+}
+
+- (void)resetWithCurrentVideoSequencer {
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        YTPlayerPIPController *pip = [self valueForKey:@"_playerPIPController"];
+        [pip setActiveSingleVideo:nil];
+    }
+    %orig;
+}
+
+- (void)resetToState:(int)arg2 {
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        YTPlayerPIPController *pip = [self valueForKey:@"_playerPIPController"];
+        [pip setActiveSingleVideo:nil];
+    }
+    %orig;
+}
+
+- (YTPlayerStatus *)playerStatusWithPlayerViewLayout:(int)layout {
+    overridePictureInPicture = !IS_IOS_OR_NEWER(iOS_14_0);
+    if (overridePictureInPicture) {
+        YTPlayerPIPController *pip = [self valueForKey:@"_playerPIPController"];
+        isInPictureInPicture = [pip isPictureInPictureActive];
+    }
+    YTPlayerStatus *status = %orig;
+    overridePictureInPicture = NO;
+    return status;
+}
+
+%end
+
+%hook MLAVPlayer
+
+- (bool)isPictureInPictureActive {
+    return [(MLPIPController *)[[self gimme] nullableInstanceForType:%c(MLPIPController)] isPictureInPictureActive];
+}
+
+%end
+
+%hook MLPlayerPool
+
+- (id)init {
+    id r = %orig;
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        MLPIPController *pip = (MLPIPController *)[[self gimme] nullableInstanceForType:%c(MLPIPController)];
+        [r setValue:pip forKey:@"_pipController"];
+    }
+    return r;
+}
+
+- (MLAVPlayer *)acquirePlayerForVideo:(MLVideo *)video playerConfig:(MLInnerTubePlayerConfig *)playerConfig stickySettings:(MLPlayerStickySettings *)stickySettings {
+    MLAVPlayer *player = [(MLAVPlayer *)[[self gimme] allocOf:%c(MLAVPlayer)] initWithVideo:video playerConfig:playerConfig stickySettings:stickySettings externalPlaybackActive:[(MLAVPlayer *)[self valueForKey:@"_activePlayer"] externalPlaybackActive]];
+    if (stickySettings)
+        player.rate = stickySettings.rate;
+    return player;
+}
+
+- (void)setActivePlayer:(MLAVPlayer *)player {
+    %orig;
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        if ([player isKindOfClass:%c(MLAVPlayer)]) {
+            MLDefaultPlayerViewFactory *factory = [self valueForKey:@"_playerViewFactory"];
+            MLVideo *video = [player video];
+            MLInnerTubePlayerConfig *config = [player config];
+            MLPIPController *pip = [self valueForKey:@"_pipController"];
+            MLAVPIPPlayerLayerView *layerView = [pip playerLayerView];
+            if (layerView) {
+                if ([factory canUsePlayerView:layerView forVideo:video playerConfig:config]) {
+                    [layerView setVideo:video playerConfig:config];
+                    [player setRenderingView:(id)layerView];
+                }
+            }
+        }
+    }
+}
+
+%end
+
+%hook YTPlayerStatus
+
+- (id)initWithExternalPlayback:(BOOL)externalPlayback
+    backgroundPlayback:(BOOL)backgroundPlayback
+    inlinePlaybackActive:(BOOL)inlinePlaybackActive
+    cardboardModeActive:(BOOL)cardboardModeActive
+    layout:(int)layout
+    userAudioOnlyModeActive:(BOOL)userAudioOnlyModeActive
+    blackoutActive:(BOOL)blackoutActive
+    clipID:(id)clipID
+    accountLinkState:(id)accountLinkState
+    muted:(BOOL)muted
+    pictureInPicture:(BOOL)pictureInPicture {
+        return %orig(externalPlayback,
+            backgroundPlayback,
+            inlinePlaybackActive,
+            cardboardModeActive,
+            layout,
+            userAudioOnlyModeActive,
+            blackoutActive,
+            clipID,
+            accountLinkState,
+            muted,
+            overridePictureInPicture ? isInPictureInPicture : pictureInPicture);
 }
 
 %end
@@ -239,23 +445,26 @@
 
 - (BOOL)isPictureInPictureSupported {
 	%orig;
-    [(YTIosMediaHotConfig *)[(YTHotConfig *)[[self gimme] instanceForType:NSClassFromString(@"YTHotConfig")] mediaHotConfig] setEnablePictureInPicture:YES];
+    [(YTIosMediaHotConfig *)[(YTHotConfig *)[[self gimme] instanceForType:%c(YTHotConfig)] mediaHotConfig] setEnablePictureInPicture:YES];
     return YES;
 }
 
 %end
 
-// This is where magic occurs! (cr. @PoomSmart)
-// I however would leave the other hooks here just in case
 %hook YTAppModule
 
 - (void)configureWithBinder:(GIMBindingBuilder *)binder {
     %orig;
-    [[[[binder bindType:NSClassFromString(@"MLPIPController")] retain] autorelease] initializedWith:^(MLPIPController *controller) {
-        MLPIPController *value = [controller initWithPlaceholderPlayerItemResourcePath:@"/Library/Application Support/YouPIP/PlaceholderVideo.mp4"];
-        [value initializePictureInPicture];
-        return value;
-    }];
+    if (!IS_IOS_OR_NEWER(iOS_14_0)) {
+        [[binder bindType:%c(MLPIPController)] initializedWith:^(MLPIPController *controller) {
+            NSBundle *mainBundle = [NSBundle mainBundle];
+            NSString *assetPath = [mainBundle pathForResource:@"PiPPlaceholderAsset" ofType:@"mp4"];
+            MLPIPController *value = [controller initWithPlaceholderPlayerItemResourcePath:assetPath];
+            if ([value respondsToSelector:@selector(initializePictureInPicture)])
+                [value initializePictureInPicture];
+            return value;
+        }];
+    }
 }
 
 %end
@@ -300,10 +509,6 @@ BOOL override = NO;
     return orig;
 }
 
-- (void)appWillResignActive:(id)arg {
-    return;
-}
-
 %end
 
 %group LateHook
@@ -337,28 +542,6 @@ BOOL override = NO;
 + (void)initialize {
     %orig;
     %init(LateHook);
-}
-
-%end
-
-%hook YTIInnertubeResourcesIosRoot
-
-+ (GPBExtensionRegistry *)extensionRegistry {
-    GPBExtensionRegistry *registry = %orig;
-    id extension = [NSClassFromString(@"YTIPictureInPictureRendererRoot") pictureInPictureRenderer];
-    [registry addExtension:extension];
-    return registry;
-}
-
-%end
-
-%hook GoogleGlobalExtensionRegistry
-
-+ (GPBExtensionRegistry *)extensionRegistry {
-    GPBExtensionRegistry *registry = %orig;
-    id extension = [NSClassFromString(@"YTIPictureInPictureRendererRoot") pictureInPictureRenderer];
-    [registry addExtension:extension];
-    return registry;
 }
 
 %end
